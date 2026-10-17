@@ -163,7 +163,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  printf("Patricia Chess Engine, written by Adam Kulju\n\n\n");
+  printf("Patricia Chess Engine, written by Adam Kulju\n");
 
   new_game(thread_info, TT);
   set_board(position, thread_info,
@@ -204,21 +204,23 @@ void uci(ThreadInfo &thread_info, Position &position) {
     }
 
     else if (command == "uci") {
-      printf("id name Patricia 5.1\n"
-             "id author Adam Kulju\n"
+      printf("id name Patricia 5.1-Next\n"
+             "id author Adam Kulju + Next\n"
              "option name Hash type spin default 32 min 1 max 131072\n"
              "option name Threads type spin default 1 min 1 max 1024\n"
              "option name SyzygyPath type string default null\n"
              "option name MultiPV type spin default 1 min 1 max 255\n"
              "option name Skill_Level type spin default 21 min 1 max 21\n"
              "option name Move_Overhead type spin default 50 min 0 max 5000\n"
+             "option name Aggression type spin default 100 min 0 max 200\n"
+             "option name CoachWeight type spin default 0 min 0 max 100\n"
              "option name UCI_Chess960 type check default false\n");
 
-      /*for (auto &param : params) {
+      for (auto &param : params) {
         std::cout << "option name " << param.name << " type spin default "
-                  << param.value << " min " << param.min << " max " << param.max
-                  << "\n";
-      }*/
+                  << param.current() << " min " << param.min << " max "
+                  << param.max << "\n";
+      }
 
       printf("uciok\n");
     }
@@ -317,6 +319,14 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
       else if (name == "Move_Overhead") {
         thread_data.move_overhead = value;
+      }
+
+      else if (name == "Aggression") {
+        thread_data.aggression = std::clamp(value, 0, 200);
+      }
+
+      else if (name == "CoachWeight") {
+        thread_data.coach_weight = std::clamp(value, 0, 100);
       }
 
       else {

@@ -1,0 +1,11 @@
+# Build artifacts
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Logs
+*.log

@@ -37,6 +37,24 @@
 inline constexpr size_t INPUT_SIZE = 768;
 inline constexpr size_t LAYER1_SIZE = 1024;
 
+// --- Big-net scaffolding: king-bucketed layout for the future GPU coach ---
+// Target: 8 buckets x 768 x 1536 (~18MB), then 16 x 768 x 2048 (~50MB).
+// Pluming lands first (bucket fn + sizes), weights stay shared 1.6MB so
+// behavior is unchanged until a trained bucketed net is dropped in.
+inline constexpr size_t NUM_BUCKETS = 8;
+inline constexpr size_t BUCKETED_INPUT_SIZE = NUM_BUCKETS * INPUT_SIZE;
+
+[[nodiscard]] inline constexpr size_t king_bucket(int king_sq,
+                                                 int color) noexcept {
+  // Mirror black king, then 4 files x 2 ranks = 8 buckets (Stockfish-style).
+  int sq = (color == 0) ? king_sq : (king_sq ^ 56);
+  int file = sq % 8;
+  int rank = sq / 8;
+  if (file > 3)
+    file = 7 - file;
+  return static_cast<size_t>((rank / 4) * 4 + (file / 2));
+}
+
 inline constexpr int SCRELU_MIN = 0;
 inline constexpr int SCRELU_MAX = 255;
 
@@ -138,6 +156,13 @@ struct alignas(64) NNUE_Params {
 INCBIN(nnue, "nets/fingolfin.nnue");
 INCBIN(nnue2, "nets/finarfin.nnue");
 INCBIN(nnue3, "nets/feanor.nnue");
+INCBIN(coach1, "nets/coach1.nnue");
+
+[[nodiscard]] inline const NNUE_Params &coach_net() noexcept {
+  static const NNUE_Params *net =
+      reinterpret_cast<const NNUE_Params *>(g_coach1Data);
+  return *std::assume_aligned<64>(net);
+}
 
 [[nodiscard]] inline const NNUE_Params &get_nnue(size_t index) noexcept {
   static const std::array<const NNUE_Params *, NUM_NETS> nets = {
@@ -402,6 +427,12 @@ public:
   void reset_nnue(const Position &position, int phase);
   void change_phases(const Position &position, int phase);
 
+  // Coach support: full refresh + eval with an explicit net (no phase logic).
+  // Root-only use: no incremental updates, so no cross-net contamination.
+  void reset_with_net(const Position &position, const NNUE_Params &net);
+  [[nodiscard]] int evaluate_with_net(int color,
+                                      const NNUE_Params &net) const;
+
 private:
   using Acc = Accumulator<LAYER1_SIZE>;
 
@@ -639,6 +670,49 @@ inline void NNUE_State::refresh_from_position(const Position &position,
 inline void NNUE_State::reset_nnue(const Position &position, int phase) {
   m_curr = m_stack.data();
   refresh_from_position(position, phase);
+}
+
+inline void NNUE_State::reset_with_net(const Position &position,
+                                       const NNUE_Params &n) {
+  m_curr = m_stack.data();
+
+  std::array<uint16_t, MAX_BOARD_PIECES> white_indices{};
+  std::array<uint16_t, MAX_BOARD_PIECES> black_indices{};
+  size_t count = 0;
+
+  for (int square = a1; square < SqNone; ++square) {
+    const int piece = position.board[square];
+    if (piece != Pieces::Blank) {
+      const auto [white_idx, black_idx] = feature_indices(piece, square);
+      white_indices[count] = static_cast<uint16_t>(white_idx);
+      black_indices[count] = static_cast<uint16_t>(black_idx);
+      ++count;
+    }
+  }
+
+  nnue_refresh_side(m_curr->white.data(), n, white_indices.data(), count);
+  nnue_refresh_side(m_curr->black.data(), n, black_indices.data(), count);
+
+  m_curr->computed = true;
+  m_curr->cached = false;
+}
+
+NNUE_HOT inline int
+NNUE_State::evaluate_with_net(int color, const NNUE_Params &n) const {
+  PATRICIA_NNUE_ASSERT(m_curr != nullptr);
+
+  Acc &acc = *m_curr;
+  materialize(m_curr);
+
+  const auto &us = (color == Colors::White) ? acc.white : acc.black;
+  const auto &them = (color == Colors::White) ? acc.black : acc.white;
+
+  const int64_t raw = screlu_flatten(us, them, n.output_v);
+  const int64_t biased = raw + static_cast<int64_t>(n.output_bias) * QA;
+  const int result =
+      static_cast<int>((biased * SCALE) /
+                       (static_cast<int64_t>(QA) * static_cast<int64_t>(QAB)));
+  return result;
 }
 
 inline void NNUE_State::change_phases(const Position &position, int phase) {

@@ -75,6 +75,27 @@ bool out_of_time(ThreadInfo &thread_info) {
   return false;
 }
 
+// GPU-coach hook, now LIVE with the attack-specialist 4th net.
+// Called ONLY at root/PV on the main thread. Blends coach judgment:
+// score += clamp(coach - cpu, +-300) * CoachWeight / 100.
+// CoachWeight 0 = main net only (previous behavior), 100 = coach decides root.
+inline int coach_correction(const Position &position, int cpu_eval, int phase) {
+  if (thread_data.coach_weight == 0) {
+    return 0;
+  }
+  (void)phase; // coach net is phase-agnostic (trained on all sharp play)
+  NNUE_State st;
+  st.reset_with_net(position, coach_net());
+  int coach_eval = st.evaluate_with_net(position.color, coach_net());
+  int diff = coach_eval - cpu_eval;
+  if (diff > 300) {
+    diff = 300;
+  } else if (diff < -300) {
+    diff = -300;
+  }
+  return diff;
+}
+
 int16_t material_eval(const Position &position) {
   int m = (position.material_count[0] - position.material_count[1]) * 100 +
           (position.material_count[2] - position.material_count[3]) * 300 +
@@ -175,6 +196,9 @@ int eval(Position &position, ThreadInfo &thread_info) {
                 : s < -100 ? 10
                            : 20);
     }
+    // Aggression knob: 0 = solid (no sac bonus), 100 = stock Patricia,
+    // 200 = double sac bonus. Applied after cache lookup so NNUE cache stays valid.
+    bonus2 = bonus2 * thread_data.aggression / 100;
   }
 
   // If we're winning, scale eval by material; we don't want to trade off to an
@@ -186,6 +210,13 @@ int eval(Position &position, ThreadInfo &thread_info) {
       total_mat(position) < 4000 &&
           ((eval > 0 && our_side) || (eval < 0 && !our_side))) {
     multiplier -= 0.1;
+  }
+
+  // Scale material aggression: 0 = no scaling (multiplier -> 1.0),
+  // 100 = stock, 200 = extra attack-minded scaling.
+  {
+    float aggr = (float)thread_data.aggression / 100.0f;
+    multiplier = 1.0f + (multiplier - 1.0f) * aggr;
   }
 
   eval = eval * multiplier;
@@ -330,6 +361,7 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   uint64_t hash = position.zobrist_key;
   uint8_t phase = thread_info.phase;
   bool tt_hit;
+  __builtin_prefetch(&TT[hash_to_idx(hash)]);
   TTEntry &entry = probe_entry(hash, tt_hit, thread_info.searches, TT);
 
   int entry_type = EntryTypes::None, tt_static_eval = ScoreNone,
@@ -393,7 +425,6 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
   if (!is_cap(position, tt_move)) {
     tt_move = MoveNone;
   }
-  int moves_played = 0;
 
   while (Move move =
              next_move(picker, position, thread_info, tt_move, !in_check)) {
@@ -403,10 +434,6 @@ int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
     }
     if (!is_legal_fast_unchecked(position, move)) {
       continue;
-    }
-    moves_played++;
-    if (moves_played > 2) {
-      break;
     }
 
     Position moved_position = position;
@@ -479,11 +506,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     int draw_score = 1 - (thread_info.nodes & 3);
 
     int material = material_eval(position);
+    int draw_avoid = 50 * thread_data.aggression / 100;
 
     if (material < -100) {
-      draw_score += 50;
+      draw_score += draw_avoid;
     } else if (material > 100) {
-      draw_score -= 50;
+      draw_score -= draw_avoid;
     }
 
     return draw_score;
@@ -524,8 +552,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   uint64_t hash = position.zobrist_key;
   uint8_t phase = thread_info.phase;
 
-  int mate_distance = ScoreMate - ply;
-  if (mate_distance <
+  int mate_distance = ScoreMate - ply;  if (mate_distance <
       beta) // Mate distance pruning; if we're at depth 10 but we've already
             // found a mate in 3, there's no point searching this.
   {
@@ -536,6 +563,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   bool tt_hit;
+  __builtin_prefetch(&TT[hash_to_idx(hash)]);
   TTEntry &entry = probe_entry(hash, tt_hit, thread_info.searches, TT);
 
   if (singular_search) {
@@ -1210,7 +1238,14 @@ void iterative_deepen(
   std::array<int, 3> score_hist{};
   int score_hist_count = 0;
 
-  for (int depth = 1; depth <= thread_info.max_iter_depth; depth++) {
+  // Lazy SMP stagger: helpers start at slightly different depths so they
+  // don't duplicate main thread work and share different TT entries.
+  int depth_start = 1;
+  if (thread_info.thread_id != 0) {
+    depth_start = 1 + (thread_info.thread_id % 3);
+  }
+
+  for (int depth = depth_start; depth <= thread_info.max_iter_depth; depth++) {
 
     int real_multi_pv =
         std::min<int>(thread_info.multipv, thread_info.root_moves.size());
@@ -1295,6 +1330,14 @@ void iterative_deepen(
 
       thread_info.best_moves[thread_info.multipv_index] = thread_info.pv[0];
 
+      // Coach blend (no-op while CoachWeight == 0): big-net correction for
+      // root/PV only. Keeps depth intact; GPU fills this in later.
+      if (thread_data.coach_weight != 0 && thread_info.thread_id == 0 &&
+          abs(score) <= ScoreTbWin) {
+        int corr = coach_correction(position, score, thread_info.phase);
+        score += corr * thread_data.coach_weight / 100;
+      }
+
       if (thread_info.thread_id == 0) {
 
         uint64_t tb_hits = thread_info.tb_hits;
@@ -1365,10 +1408,15 @@ void iterative_deepen(
         score_hist_count++;
 
         if (depth >= 6 && total_mat(position) >= PhaseBound) {
+          // Aggression scales Sacrifice-net entry: higher aggression = lower
+          // threshold (more willing to sack), 0 = never use Sacrifice net.
+          int sac_threshold = thread_data.aggression <= 0
+                                  ? ScoreWin
+                                  : 400 * 100 / thread_data.aggression;
           if (thread_info.best_scores[0] < -20) {
             thread_info.phase = PhaseTypes::Endgame;
             thread_info.nnue_state.reset_nnue(position, thread_info.phase);
-          } else if (thread_info.best_scores[0] > 400) {
+          } else if (thread_info.best_scores[0] > sac_threshold) {
             thread_info.phase = PhaseTypes::Sacrifice;
             thread_info.nnue_state.reset_nnue(position, thread_info.phase);
           } else {
@@ -1420,8 +1468,25 @@ void search_position(Position &position, ThreadInfo &thread_info,
   reset_barrier.arrive_and_wait();
 
   for (int i = 0; i < thread_data.thread_infos.size(); i++) {
-    thread_data.thread_infos[i] = thread_info;
-    thread_data.thread_infos[i].thread_id = i + 1;
+    // Selective sync: helpers keep their OWN history tables across searches
+    // (no 6MB memcpy, plus Lazy-SMP diversity). Only search state is shared.
+    ThreadInfo &h = thread_data.thread_infos[i];
+    h.position = position;
+    h.game_hist = thread_info.game_hist;
+    h.game_ply = thread_info.game_ply;
+    h.start_time = thread_info.start_time;
+    h.max_time = thread_info.max_time;
+    h.opt_time = thread_info.opt_time;
+    h.original_opt = thread_info.original_opt;
+    h.max_iter_depth = thread_info.max_iter_depth;
+    h.max_nodes_searched = thread_info.max_nodes_searched;
+    h.opt_nodes_searched = thread_info.opt_nodes_searched;
+    h.multipv = thread_info.multipv;
+    h.doing_datagen = thread_info.doing_datagen;
+    h.is_human = thread_info.is_human;
+    h.cp_loss = thread_info.cp_loss;
+    h.searches = thread_info.searches;
+    h.thread_id = i + 1;
   }
 
   // Tell threads to start
