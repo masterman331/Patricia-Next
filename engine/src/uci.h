@@ -163,7 +163,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  printf("Patricia Chess Engine, written by Adam Kulju\n");
+  printf("Patricia Chess Engine, written by Adam Kulju - modified by "
+         "masterman331!!!\n");
 
   new_game(thread_info, TT);
   set_board(position, thread_info,
@@ -204,8 +205,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
     }
 
     else if (command == "uci") {
-      printf("id name Patricia 5.1-Next\n"
-             "id author Adam Kulju + Next\n"
+      printf("id name Patricia 5.1-Next (modified by masterman331!!!)\n"
+             "id author Adam Kulju + Next, modified by masterman331!!!\n"
              "option name Hash type spin default 32 min 1 max 131072\n"
              "option name Threads type spin default 1 min 1 max 1024\n"
              "option name SyzygyPath type string default null\n"
