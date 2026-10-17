@@ -1463,8 +1463,10 @@ void search_position(Position &position, ThreadInfo &thread_info,
   reset_barrier.arrive_and_wait();
 
   for (int i = 0; i < thread_data.thread_infos.size(); i++) {
-    // Selective sync: helpers keep their OWN history tables across searches
-    // (no 6MB memcpy, plus Lazy-SMP diversity). Only search state is shared.
+    // Lazy-SMP style shared root: helpers get the game state copied in each
+    // search (game_hist IS semantically required - the eval sac-scan and
+    // TT-aging read it - so this ~100KB copy per helper is not dead weight).
+    // Their own move/counter tables persist across searches for diversity.
     ThreadInfo &h = thread_data.thread_infos[i];
     h.position = position;
     h.game_hist = thread_info.game_hist;

@@ -1,4 +1,4 @@
-.PHONY: build datagen aarch64 cross-aarch64 cross-aarch64-clang
+.PHONY: build datagen aarch64 cross-aarch64 cross-aarch64-clang pgo
 
 EXE := patricia
 SOURCES := src/patricia.cpp src/fathom/src/tbprobe.c
@@ -50,3 +50,18 @@ cross-aarch64-clang: CXXFLAGS := --target=aarch64-linux-gnu -O3 -std=c++20 -ffas
 cross-aarch64-clang: OUT := $(EXE)_aarch64$(SUFFIX)
 cross-aarch64-clang: $(SOURCES)
 	$(CXX) $(CXXFLAGS) $^ -o $(OUT)
+
+# --- PGO + LTO build ------------------------------------------------------
+# Stage 1: instrumented binary profiled with the standard bench workload.
+# This is exactly how the upstream Patricia release binaries are built.
+# GCC names .gcda files after the -o output, so both stages use $(PGO_OUT).
+PGO_OUT := patricia_pgo$(SUFFIX)
+
+pgo: $(SOURCES)
+	$(CXX) $^ $(CXXFLAGS) -fprofile-generate -o $(PGO_OUT) $(LINKER)
+	./$(PGO_OUT) bench > /dev/null
+	./$(PGO_OUT) bench > /dev/null
+	./$(PGO_OUT) bench > /dev/null
+	$(CXX) $^ $(CXXFLAGS) -flto -fprofile-use -fprofile-correction -o $(PGO_OUT) $(LINKER)
+	@rm -f ./*.gcda
+	@echo PGO build complete: $(PGO_OUT)

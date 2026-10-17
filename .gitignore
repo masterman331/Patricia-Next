@@ -9,3 +9,6 @@
 
 # Logs
 *.log
+*.gcda
+*.gcno
+patricia_prof.exe
