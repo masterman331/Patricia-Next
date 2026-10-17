@@ -59,6 +59,10 @@ struct ThreadInfo {
   bool doing_datagen = false;
   bool datagen_stop = false;
 
+  // "Sac Radar": one info-string announcement per search when the PV shows
+  // the engine deliberately giving away material (Patricia's signature).
+  bool sac_announced = false;
+
   bool is_human = false;
   int cp_accum_loss = 0;
   int cp_loss = 0;

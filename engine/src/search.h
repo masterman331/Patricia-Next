@@ -1153,6 +1153,45 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   return best_score;
 }
 
+// Sac Radar helper: replay the PV and measure how the root side's material
+// swings. Returns the biggest single-ply drop and the final balance.
+[[nodiscard]] std::pair<int, int>
+pv_material_metrics(const Position &position, const ThreadInfo &thread_info) {
+  Position temp_pos = position;
+  const int root_color = position.color;
+  int prev_mat = material_eval(position);
+  int drop_max = 0;
+  int final_mat = prev_mat;
+
+  int indx = 0;
+  while (thread_info.pv[indx] != MoveNone) {
+    Move best_move = thread_info.pv[indx];
+
+    MoveInfo moves;
+    int movelen = legal_movegen(temp_pos, moves.moves);
+    bool found_move = false;
+    for (int i = 0; i < movelen; i++) {
+      if (moves.moves[i] == best_move) {
+        found_move = true;
+        break;
+      }
+    }
+    if (!found_move) {
+      break;
+    }
+
+    make_move(temp_pos, best_move);
+    const int mat = temp_pos.color == root_color ? material_eval(temp_pos)
+                                                 : -material_eval(temp_pos);
+    drop_max = std::max(drop_max, prev_mat - mat);
+    prev_mat = mat;
+    final_mat = mat;
+    indx++;
+  }
+
+  return {drop_max, final_mat};
+}
+
 void print_pv(Position &position, ThreadInfo &thread_info) {
   Position temp_pos = position;
 
@@ -1201,6 +1240,7 @@ void iterative_deepen(
 
   thread_info.original_opt = thread_info.opt_time;
   thread_info.datagen_stop = false;
+  thread_info.sac_announced = false;
   thread_info.phase = total_mat(position) < PhaseBound ? PhaseTypes::Endgame
                                                        : PhaseTypes::Sacrifice;
   thread_info.nnue_state.reset_nnue(position, thread_info.phase);
@@ -1444,6 +1484,18 @@ finish:
   search_end_barrier.arrive_and_wait();
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
       !thread_info.is_human) {
+    // Sac Radar: final-PV verdict, printed right before bestmove so GUIs
+    // see it as part of the search.
+    if (thread_info.pv[0] == thread_info.best_moves[0] &&
+        thread_info.pv[0] != MoveNone) {
+      const auto [drop_max, final_mat] =
+          pv_material_metrics(position, thread_info);
+      if (drop_max >= 200 && final_mat <= -200) {
+        printf("info string Sac Radar: Patricia gives ~%d cp of material in "
+               "the main line - attack incoming!\n",
+               -final_mat);
+      }
+    }
     printf("bestmove %s\n",
            internal_to_uci(position, thread_info.best_moves[0]).c_str());
   }
