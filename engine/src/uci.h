@@ -212,7 +212,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
              "option name MultiPV type spin default 1 min 1 max 255\n"
              "option name Skill_Level type spin default 21 min 1 max 21\n"
              "option name Move_Overhead type spin default 50 min 0 max 5000\n"
-             "option name Aggression type spin default 100 min 0 max 200\n"
+             "option name Aggression type spin default 100 min 0 max 300\n"
              "option name CoachWeight type spin default 0 min 0 max 100\n"
              "option name UCI_Chess960 type check default false\n");
 
@@ -322,7 +322,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
       }
 
       else if (name == "Aggression") {
-        thread_data.aggression = std::clamp(value, 0, 200);
+        thread_data.aggression = std::clamp(value, 0, 300);
       }
 
       else if (name == "CoachWeight") {

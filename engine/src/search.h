@@ -132,50 +132,48 @@ int eval(Position &position, ThreadInfo &thread_info) {
   // Patricia is much less dependent on explicit eval twiddling than before, but
   // there are still a few things I do.
 
-  int bonus1 = 0, bonus2 = 0;
+  int bonus2 = 0;
 
-  /*
-    // Give a small bonus if the position is much better than what material
-    would
-    // suggest
-    if (eval > 0 && eval > m_eval + m_threshold) {
-      bonus1 += 25 + (eval - m_eval - m_threshold) / 10;
-    } else if (eval < 0 && eval < m_eval - m_threshold) {
-      bonus1 -= 25 + (m_eval - eval - m_threshold) / 10;
-    }
-  */
+  // total_mat and material_eval are O(1) arithmetic, but they were being
+  // recomputed several times per leaf (incl. once per scan-loop iteration).
+  const int mat_total = total_mat(position);
 
   bool our_side = (thread_info.search_ply % 2 == 0);
 
   int start_index = std::max(thread_info.game_ply - thread_info.search_ply, 0);
 
-  int s_m = thread_info.game_hist[start_index].m_diff;
   int s = 0;
 
-  // Give a small bonus if we have sacrificed material at some point in the
-  // search tree If we are completely winning, give a bigger bonus to
-  // incentivize finding the most stylish move when everything wins
+  // Scan only when material is high enough for the sac bonus to apply at all;
+  // in every endgame this skips the whole loop.
+  if (mat_total > 4500) {
+    const int cur_mat = material_eval(position);
 
-  for (int idx = start_index + 2; idx < thread_info.game_ply - 4; idx += 2) {
+    // Give a small bonus if we have sacrificed material at some point in the
+    // search tree If we are completely winning, give a bigger bonus to
+    // incentivize finding the most stylish move when everything wins
 
-    if (thread_info.game_hist[idx].m_diff < 0 &&
-        thread_info.game_hist[idx + 1].m_diff > 0 &&
-        thread_info.game_hist[idx + 2].m_diff < 0 &&
-        thread_info.game_hist[idx + 3].m_diff > 0 &&
-        thread_info.game_hist[idx + 4].m_diff < 0) {
+    for (int idx = start_index + 2; idx < thread_info.game_ply - 4; idx += 2) {
 
-      s = thread_info.game_hist[idx + 4].m_diff;
-      break;
-    }
+      if (thread_info.game_hist[idx].m_diff < 0 &&
+          thread_info.game_hist[idx + 1].m_diff > 0 &&
+          thread_info.game_hist[idx + 2].m_diff < 0 &&
+          thread_info.game_hist[idx + 3].m_diff > 0 &&
+          thread_info.game_hist[idx + 4].m_diff < 0) {
 
-    if (thread_info.game_hist[idx].m_diff < 0 &&
-        thread_info.game_hist[idx].m_diff == material_eval(position)) {
+        s = thread_info.game_hist[idx + 4].m_diff;
+        break;
+      }
 
-      s = thread_info.game_hist[idx].m_diff;
-      break;
+      if (thread_info.game_hist[idx].m_diff < 0 &&
+          thread_info.game_hist[idx].m_diff == cur_mat) {
+
+        s = thread_info.game_hist[idx].m_diff;
+        break;
+      }
     }
   }
-  if (s && total_mat(position) > 4500) {
+  if (s) {
 
     if (thread_info.search_ply % 2) {
       bonus2 = -50 *
@@ -196,18 +194,17 @@ int eval(Position &position, ThreadInfo &thread_info) {
                 : s < -100 ? 10
                            : 20);
     }
-    // Aggression knob: 0 = solid (no sac bonus), 100 = stock Patricia,
-    // 200 = double sac bonus. Applied after cache lookup so NNUE cache stays valid.
+    // Aggression knob: 0 = always solid, 100 = stock Patricia, 300 = max.
     bonus2 = bonus2 * thread_data.aggression / 100;
   }
 
   // If we're winning, scale eval by material; we don't want to trade off to an
   // easily won endgame, but instead should continue the attack.
 
-  float multiplier = ((float)750 + total_mat(position) / 25) / 1024;
+  float multiplier = ((float)750 + mat_total / 25) / 1024;
 
   if (!position.material_count[root_color + 8] ||
-      total_mat(position) < 4000 &&
+      mat_total < 4000 &&
           ((eval > 0 && our_side) || (eval < 0 && !our_side))) {
     multiplier -= 0.1;
   }
@@ -221,7 +218,7 @@ int eval(Position &position, ThreadInfo &thread_info) {
 
   eval = eval * multiplier;
 
-  return std::clamp(eval + bonus1 + bonus2, ScoreLost + 1, ScoreWin - 1);
+  return std::clamp(eval + bonus2, ScoreLost + 1, ScoreWin - 1);
 }
 
 int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
@@ -552,7 +549,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   uint64_t hash = position.zobrist_key;
   uint8_t phase = thread_info.phase;
 
-  int mate_distance = ScoreMate - ply;  if (mate_distance <
+  int mate_distance = ScoreMate - ply;
+  if (mate_distance <
       beta) // Mate distance pruning; if we're at depth 10 but we've already
             // found a mate in 3, there's no point searching this.
   {
@@ -1353,13 +1351,10 @@ void iterative_deepen(
         if (search_time) {
           nps = static_cast<int64_t>(nodes) * 1000 / search_time;
         } else {
-          int wezly = 10000000;
-          wezly += (wezly / 7);
-          nps = wezly;
+          nps = nodes; // died too fast to measure; don't make up a number
         }
 
-        if (!thread_info.doing_datagen /*&&
-            !(thread_info.is_human && thread_info.multipv_index)*/) {
+        if (!thread_info.doing_datagen) {
           printf("info multipv %i depth %i seldepth %i score %s nodes %" PRIu64
                  " nps %" PRIi64 " tbhits %" PRIu64 " time %" PRIi64 " pv ",
                  thread_info.multipv_index + 1, depth, thread_info.seldepth,
