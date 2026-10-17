@@ -214,6 +214,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
              "option name Move_Overhead type spin default 50 min 0 max 5000\n"
              "option name Aggression type spin default 100 min 0 max 300\n"
              "option name CoachWeight type spin default 0 min 0 max 100\n"
+             "option name EvalFile type string default\n"
+             "option name CoachFile type string default\n"
              "option name UCI_Chess960 type check default false\n");
 
       for (auto &param : params) {
@@ -264,6 +266,69 @@ void uci(ThreadInfo &thread_info, Position &position) {
         } else {
           printf("Error initializing tablebase. Please try again!\n");
         }
+      }
+
+      // EvalFile replaces all three phase slots with one net (that's the
+      // workflow for freshly trained nets). CoachFile swaps the coach net.
+      // Files are loaded from disk; embedded nets are the fallback.
+      else if (name == "EvalFile") {
+        std::string path;
+        input_stream >> path;
+        std::string rest;
+        std::getline(input_stream, rest);
+        path += rest; // paths may contain spaces
+        while (!path.empty() &&
+               (path.back() == '\r' || path.back() == '\n' ||
+                path.back() == ' ')) {
+          path.pop_back();
+        }
+
+        if (path.empty()) {
+          for (int slot = 0; slot < 3; slot++) {
+            nnue_clear_slot(slot);
+          }
+          printf("info string EvalFile cleared, using embedded nets\n");
+        } else {
+          bool ok = true;
+          for (int slot = 0; slot < 3; slot++) {
+            ok = nnue_load_file(path, slot) && ok;
+          }
+          if (ok) {
+            printf("info string EvalFile loaded: %s\n", path.c_str());
+          } else {
+            printf("info string Warning: could not load EvalFile %s (wrong "
+                   "format or missing file)\n",
+                   path.c_str());
+          }
+        }
+
+        continue;
+      }
+
+      else if (name == "CoachFile") {
+        std::string path;
+        input_stream >> path;
+        std::string rest;
+        std::getline(input_stream, rest);
+        path += rest; // paths may contain spaces
+        while (!path.empty() &&
+               (path.back() == '\r' || path.back() == '\n' ||
+                path.back() == ' ')) {
+          path.pop_back();
+        }
+
+        if (path.empty()) {
+          nnue_clear_slot(3);
+          printf("info string CoachFile cleared, using embedded coach net\n");
+        } else if (nnue_load_file(path, 3)) {
+          printf("info string CoachFile loaded: %s\n", path.c_str());
+        } else {
+          printf("info string Warning: could not load CoachFile %s (wrong "
+                 "format or missing file)\n",
+                 path.c_str());
+        }
+
+        continue;
       }
 
       input_stream >> value;

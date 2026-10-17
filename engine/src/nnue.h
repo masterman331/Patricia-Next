@@ -6,9 +6,11 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <span>
+#include <string>
 #include <utility>
 
 #if defined(NDEBUG) || defined(__OPTIMIZE__) ||                                \
@@ -158,9 +160,66 @@ INCBIN(nnue2, "nets/finarfin.nnue");
 INCBIN(nnue3, "nets/feanor.nnue");
 INCBIN(coach1, "nets/coach1.nnue");
 
+// Runtime net loading (EvalFile / CoachFile): slots 0-2 are the phase nets,
+// slot 3 is the coach net. nullptr means "use the embedded net". The loaded
+// file must be exactly sizeof(NNUE_Params) bytes (the .nnue output format).
+inline std::unique_ptr<std::uint8_t[]> g_net_storage[4];
+inline const NNUE_Params *g_net_ptrs[4] = {nullptr, nullptr, nullptr, nullptr};
+
+// Exact serialized size of a .nnue file (sizeof(NNUE_Params) rounds up to a
+// 64-byte boundary because of alignas, so use the field sum).
+inline constexpr size_t NNUE_FILE_SIZE =
+    (INPUT_SIZE * LAYER1_SIZE + LAYER1_SIZE + LAYER1_SIZE * 2 + 1) *
+    sizeof(int16_t);
+
+inline bool nnue_load_file(const std::string &path, int slot) noexcept try {
+  if (path.empty() || slot < 0 || slot > 3) {
+    return false;
+  }
+
+  FILE *file = std::fopen(path.c_str(), "rb");
+  if (!file) {
+    return false;
+  }
+
+  std::fseek(file, 0, SEEK_END);
+  const long file_size = std::ftell(file);
+  std::fseek(file, 0, SEEK_SET);
+
+  if (file_size != static_cast<long>(NNUE_FILE_SIZE)) {
+    std::fclose(file);
+    return false;
+  }
+
+  auto storage = std::unique_ptr<std::uint8_t[]>(new std::uint8_t[file_size + 64]);
+  const size_t read = std::fread(storage.get(), 1, file_size, file);
+  std::fclose(file);
+
+  if (read != static_cast<size_t>(file_size)) {
+    return false;
+  }
+
+  uintptr_t aligned = reinterpret_cast<uintptr_t>(storage.get());
+  aligned = (aligned + 63) & ~uintptr_t(63);
+
+  g_net_storage[slot] = std::move(storage);
+  g_net_ptrs[slot] = reinterpret_cast<const NNUE_Params *>(aligned);
+  return true;
+} catch (...) {
+  return false;
+}
+
+inline void nnue_clear_slot(int slot) noexcept {
+  if (slot >= 0 && slot <= 3) {
+    g_net_storage[slot].reset();
+    g_net_ptrs[slot] = nullptr;
+  }
+}
+
 [[nodiscard]] inline const NNUE_Params &coach_net() noexcept {
-  static const NNUE_Params *net =
+  static const NNUE_Params *embed =
       reinterpret_cast<const NNUE_Params *>(g_coach1Data);
+  const NNUE_Params *net = g_net_ptrs[3] ? g_net_ptrs[3] : embed;
   return *std::assume_aligned<64>(net);
 }
 
@@ -171,7 +230,8 @@ INCBIN(coach1, "nets/coach1.nnue");
       reinterpret_cast<const NNUE_Params *>(g_nnue3Data),
   };
   PATRICIA_NNUE_ASSERT(index < nets.size());
-  return *std::assume_aligned<64>(nets[index]);
+  const NNUE_Params *net = g_net_ptrs[index] ? g_net_ptrs[index] : nets[index];
+  return *std::assume_aligned<64>(net);
 }
 
 [[nodiscard]] inline constexpr size_t phase_to_index(int phase) noexcept {
